@@ -1,4 +1,6 @@
 import os
+import json
+import types
 import random
 from pathlib import Path
 from dataclasses import dataclass
@@ -8,59 +10,33 @@ from typing import List
 from PIL import Image
 import datasets
 
-#CUB_ROOT_DIR = Path("/local/scratch_1/datasets/CUB_200_2011")
-CUB_ROOT_DIR = Path("/local/scratch/cv_datasets/CUB_200_2011")
-CUB_COND_DIR = Path("/local/scratch/carlyn.1/cub_pose")
+AP10K_ROOT_DIR = Path("/local/scratch/carlyn.1/datasets/ap-10k/")
 
-ATT_FILE = "/home/carlyn.1/diffusion/datasets/cub/attributes.txt"
-
-@dataclass
-class ImageAttribute:
-    id: str
-    is_present: bool
-    certanty_id: int
-    attribute_parts: List[str]
-    
-def get_attribute_key(att_file):
-    # Get attribute tree
-    id_to_attribute_map = {}
-    with open(att_file, 'r') as f:
-        for line in f.readlines():
-            id, name = line.split(" ")
-            root_att, base_att = name.strip().split("::")
-            id_to_attribute_map[id] = [root_att, base_att]
-    
-    return id_to_attribute_map
-
-def get_image_attributes(attr_map, img_att_path):
-    img_attributes = defaultdict(list)
-    with open(img_att_path, 'r') as f:
-        for line in f.readlines():
-            line = line.strip()
-            img_id, att_id, is_present, cert_id = line.split()[:4]
-            img_att = ImageAttribute(att_id, is_present=="1", int(cert_id), attr_map[att_id])
-            img_attributes[img_id].append(img_att)
-    return img_attributes
-
-def get_cub_classnames(cls_path):
-    class_names = []
-    with open(cls_path, 'r') as f:
-        class_names = [line.split(" ")[-1].strip() for line in f.readlines()]
+def collect_and_sort_classnames(ann_data):
+    class_names = sorted([(c['id'], c['name']) for c in ann_data['categories']], key=lambda x: x[0])
+    class_names = [c[0] for c in class_names]
     return class_names
+
+def get_ap10k_classnames(root_path):
+    ann_path = root_path / "annotations/ap10k-train-split1.json"
+    with open(ann_path, 'r') as f:
+        ann_data = json.load(f)
+        class_names = collect_and_sort_classnames(ann_data)
+        return class_names
 
 def load_image(path):
     with open(path, 'r') as f:
         return Image.open(path).convert("RGB")
 
-class CUB(datasets.GeneratorBasedBuilder):
-    """CUB dataset with attributes."""
+class AP10K(datasets.GeneratorBasedBuilder):
+    """AP10K dataset with pose conditioning."""
     def _info(self):
         return datasets.DatasetInfo(
             description="CUB attribute dataset",
             features=datasets.Features(
                 {
                     "image": datasets.Image(),
-                    "label": datasets.ClassLabel(names=get_cub_classnames(CUB_ROOT_DIR / "classes.txt")),
+                    "label": datasets.ClassLabel(names=get_ap10k_classnames(AP10K_ROOT_DIR)),
                     #"attributes": datasets.Value("string")
                     #"attributes_root": datasets.Sequence(feature=datasets.Value(dtype="string")),
                     #"attributes_desc": datasets.Sequence(feature=datasets.Value(dtype="string")),
@@ -72,75 +48,77 @@ class CUB(datasets.GeneratorBasedBuilder):
         )
 
     def _split_generators(self, dl_manager):
-        train_ids = []
-        val_ids = []
-        with open(CUB_ROOT_DIR / "train_test_split.txt", 'r') as f:
-            for line in f.readlines():
-                img_id, is_train = line.split(" ")
-                is_train = is_train.strip() == "1"
-                if is_train:
-                    train_ids.append(img_id)
-                else:
-                    val_ids.append(img_id)
-        
-        train_classes = []
-        val_classes = []            
-        with open(CUB_ROOT_DIR / "image_class_labels.txt", 'r') as f:
-            for line in f.readlines():
-                img_id, cls_lbl = line.strip().split(" ")
-                cls_lbl = int(cls_lbl) - 1 # They are listed 1 - 200
-                if img_id in train_ids:
-                    train_classes.append(cls_lbl)
-                elif img_id in val_ids:
-                    val_classes.append(cls_lbl)
-                else:
-                    raise AssertionError(f"{img_id} not in train or validation splits.")
+        def collect(ann_data):
+            #TODO: clean up here. make dictionary obj here to record data
+            #Add background data labels too. WIll have to add a map from idx to name manually based on GitHub
+            categories = collect_and_sort_classnames(ann_data)
+            ids = []
+            class_idx = []
+            class_names = []
+            img_paths = []
+            keypoints = []
+            keypoint_visible = []
+            for i, ann in enumerate(ann_data['annotations']):
+                img_id = ann['image_id']
+                ids.append(img_id)
+                cat_id = ann['category_id']-1
+                class_idx.append(cat_id) # Starts at 1, so substract 1
+                class_names.append(categories[cat_id])
+                img_paths.append(AP10K_ROOT_DIR / "data" / ann['images'][i]['file_name'])
+                assert ann['images'][i]['id'] == img_id, "Data not aligned. Image ids did not match."
                 
-        lbl_to_cls_name_map = {}
-        with open(CUB_ROOT_DIR / "classes.txt", 'r') as f:
-            for line in f.readlines():
-                idx, name = line.split(" ")
-                name = name.split(".")[1].replace("_", " ")
-                idx = int(idx) - 1
-                lbl_to_cls_name_map[idx] = name
-                
+                # Based on the file here: https://github.com/AlexTheBad/AP-10K/blob/main/tools/dataset/parse_animalpose_dataset.py
+                # It seems that the format is <x>, <y>, <is_valid>, <x2>, <y2>, <is_valid2>, ...?
+                # As long as the <is_valid> is not 0, it should be good. Even though the file only puts either 0 or 2
+                ann_kps = ann['keypoints']
+                for i in range(len(ann_kps) // 3):
+                    si = i*3
+                    x, y, is_valid = ann_kps[si:si+3]
+                    keypoints.append((x, y))
+                    keypoint_visible.append(is_valid > 0)
+            
+            rv = types.SimpleNamespace()
+            rv.ids = ids
+            rv.class_idx = class_idx
+            rv.class_names = class_names
+            rv.img_paths = img_paths
+            rv.keypoints = keypoints
+            rv.keypoint_visible = keypoint_visible
+            return rv
         
-        #id_to_attribute_map = get_attribute_key(ATT_FILE)
-        #img_attributes = get_image_attributes(id_to_attribute_map, CUB_ROOT_DIR / "attributes" / "image_attribute_labels.txt")
-        
-        #train_atts = [img_attributes[id] for id in train_ids]
-        #val_atts = [img_attributes[id] for id in val_ids]
-        
-        train_paths = []
-        val_paths = []
-        
-        train_cond_paths = []
-        val_cond_paths = []
-        
-        with open(CUB_ROOT_DIR / "images.txt", 'r') as f:
-            for line in f.readlines():
-                img_id, short_path = line.strip().split(" ")
-                fname = short_path.split("/")[-1]
-                full_path = CUB_ROOT_DIR / "images" / short_path
-                cond_full_path = CUB_COND_DIR / fname
-                if img_id in train_ids:
-                    train_paths.append(full_path)
-                    train_cond_paths.append(cond_full_path)
-                elif img_id in val_ids:
-                    val_paths.append(full_path)
-                    val_cond_paths.append(cond_full_path)
-                else:
-                    raise AssertionError(f"{img_id} not in train or validation splits.")
-                
-        train_cls_names = [lbl_to_cls_name_map[idx] for idx in train_classes]
-        val_cls_names = [lbl_to_cls_name_map[idx] for idx in train_classes]
+        train_data = collect(AP10K_ROOT_DIR / "annotations/ap10k-train-split1.json")
+        val_data = collect(AP10K_ROOT_DIR / "annotations/ap10k-train-split1.json")
+        test_data = collect(AP10K_ROOT_DIR / "annotations/ap10k-train-split1.json")
         
         return [
-            datasets.SplitGenerator(name=datasets.Split.TRAIN, gen_kwargs={"filepaths": train_paths, "labels" : train_classes, "class_names": train_cls_names, "ids": train_ids, "cond_paths": train_cond_paths}),
-            datasets.SplitGenerator(name=datasets.Split.VALIDATION, gen_kwargs={"filepaths": val_paths, "labels" : val_classes, "class_names": val_cls_names, "ids": val_ids, "cond_paths": val_cond_paths}),
+            datasets.SplitGenerator(name=datasets.Split.TRAIN, gen_kwargs={
+                "ids": train_data.ids, 
+                "class_idx": train_data.class_idx, 
+                "class_names": train_data.class_names, 
+                "img_paths": train_data.img_paths, 
+                "keypoints": train_data.keypoints, 
+                "keypoint_visible": train_data.keypoint_visible
+            }),
+            datasets.SplitGenerator(name=datasets.Split.VALIDATION, gen_kwargs={
+                "ids": val_data.ids, 
+                "class_idx": val_data.class_idx, 
+                "class_names": val_data.class_names, 
+                "img_paths": val_data.img_paths, 
+                "keypoints": val_data.keypoints, 
+                "keypoint_visible": val_data.keypoint_visible
+            }),
+            datasets.SplitGenerator(name=datasets.Split.TEST, gen_kwargs={
+                "ids": test_data.ids, 
+                "class_idx": test_data.class_idx, 
+                "class_names": test_data.class_names, 
+                "img_paths": test_data.img_paths, 
+                "keypoints": test_data.keypoints, 
+                "keypoint_visible": test_data.keypoint_visible
+            }),
         ]
 
     def _generate_examples(self, filepaths, labels, class_names, ids, cond_paths):
+        # TODO: finish here
         for filepath, label, cls_name, id, cond_path in zip(filepaths, labels, class_names, ids, cond_paths):
             img = load_image(filepath)
             cond_img = load_image(cond_path)
