@@ -59,21 +59,15 @@ class AP10K(datasets.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager):
         def collect(ann_data):
             # TODO: Add background data labels too. WIll have to add a map from idx to name manually based on GitHub
-
+            data = defaultdict(list)
             categories = collect_and_sort_classnames(ann_data)
-            ids = []
-            class_idx = []
-            class_names = []
-            img_paths = []
-            keypoints = []
-            keypoint_visible = []
             for i, ann in enumerate(ann_data["annotations"]):
                 img_id = ann["image_id"]
-                ids.append(img_id)
+                data["ids"].append(img_id)
                 cat_id = ann["category_id"] - 1
-                class_idx.append(cat_id)  # Starts at 1, so substract 1
-                class_names.append(categories[cat_id])
-                img_paths.append(
+                data["class_idx"].append(cat_id)  # Starts at 1, so substract 1
+                data["class_names"].append(categories[cat_id])
+                data["img_paths"].append(
                     AP10K_ROOT_DIR / "data" / ann["images"][i]["file_name"]
                 )
                 assert (
@@ -87,17 +81,10 @@ class AP10K(datasets.GeneratorBasedBuilder):
                 for i in range(len(ann_kps) // 3):
                     si = i * 3
                     x, y, is_valid = ann_kps[si : si + 3]
-                    keypoints.append((x, y))
-                    keypoint_visible.append(is_valid > 0)
+                    data["keypoints"].append((x, y))
+                    data["keypoint_visible"].append(is_valid > 0)
 
-            rv = types.SimpleNamespace()
-            rv.ids = ids
-            rv.class_idx = class_idx
-            rv.class_names = class_names
-            rv.img_paths = img_paths
-            rv.keypoints = keypoints
-            rv.keypoint_visible = keypoint_visible
-            return rv
+            return data
 
         train_data = collect(AP10K_ROOT_DIR / "annotations/ap10k-train-split1.json")
         val_data = collect(AP10K_ROOT_DIR / "annotations/ap10k-train-split1.json")
@@ -106,36 +93,15 @@ class AP10K(datasets.GeneratorBasedBuilder):
         return [
             datasets.SplitGenerator(
                 name=datasets.Split.TRAIN,
-                gen_kwargs={
-                    "ids": train_data.ids,
-                    "class_idx": train_data.class_idx,
-                    "class_names": train_data.class_names,
-                    "img_paths": train_data.img_paths,
-                    "keypoints": train_data.keypoints,
-                    "keypoint_visible": train_data.keypoint_visible,
-                },
+                gen_kwargs={**train_data},
             ),
             datasets.SplitGenerator(
                 name=datasets.Split.VALIDATION,
-                gen_kwargs={
-                    "ids": val_data.ids,
-                    "class_idx": val_data.class_idx,
-                    "class_names": val_data.class_names,
-                    "img_paths": val_data.img_paths,
-                    "keypoints": val_data.keypoints,
-                    "keypoint_visible": val_data.keypoint_visible,
-                },
+                gen_kwargs={**val_data},
             ),
             datasets.SplitGenerator(
                 name=datasets.Split.TEST,
-                gen_kwargs={
-                    "ids": test_data.ids,
-                    "class_idx": test_data.class_idx,
-                    "class_names": test_data.class_names,
-                    "img_paths": test_data.img_paths,
-                    "keypoints": test_data.keypoints,
-                    "keypoint_visible": test_data.keypoint_visible,
-                },
+                gen_kwargs={**test_data},
             ),
         ]
 
