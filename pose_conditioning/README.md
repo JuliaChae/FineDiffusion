@@ -1,3 +1,9 @@
+# Installing experiment tools
+
+```
+pip install -e .
+```
+
 # Diffusion Training
 
 ## Training text-to-image
