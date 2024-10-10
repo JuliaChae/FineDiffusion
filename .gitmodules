@@ -1,3 +1,0 @@
-[submodule "pose_conditioning/diffusers"]
-	path = pose_conditioning/diffusers
-	url = https://github.com/huggingface/diffusers.git
